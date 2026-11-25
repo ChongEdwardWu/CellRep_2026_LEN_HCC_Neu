@@ -8,13 +8,15 @@
 # treatment-level biological-replicate inference. Matched-background
 # attenuation is an effect-size criterion, not a formal interaction/rescue test.
 #
-# FindMarkers() uses an explicit LogNormalize mean function, and each fold change
-# is independently recalculated from the RNA data matrix for numerical QA.
+# Historical effect for RNA data x = ln(1 + CP10K): S_g = log2((1 + sum(x))/n_g).
+# Matched effects are treated S minus control S. Legacy avg_log2FC columns store
+# these effects on the mean log-normalized expression scale. The pseudocount
+# is added once per group sum. Independent matrix QA uses row means.
 
 rm(list = ls())
 gc()
 
-script_version <- "1.0.0"
+script_version <- "1.0.1"
 canonical_md5 <- "e0c009949ae4392a3779ec1217dbfbb3"
 default_input <- NA_character_
 default_outdir <- file.path("results", "Step7_Len_CD45_lineage_remodeling")
@@ -166,6 +168,7 @@ output_paths <- list(
   go_mapping = file.path(dirs$tables, "Step7_GO_BP_gene_mapping.csv"),
   go_full = file.path(dirs$tables, "Step7_GO_BP_full.csv"),
   go_simplified = file.path(dirs$tables, "Step7_GO_BP_simplified_significant.csv"),
+  go_audit = file.path(dirs$tables, "Step7_GO_BP_display_selection_audit.csv"),
   go_display = file.path(dirs$tables, "Step7_GO_BP_display_terms.csv"),
   qa = file.path(dirs$root, "Step7_QA_checks.csv"),
   report = file.path(dirs$root, "Step7_summary.md"),
@@ -405,9 +408,9 @@ if (length(missing_identities)) {
   stop("Missing lineage/group identities: ", paste(missing_identities, collapse = ", "), call. = FALSE)
 }
 
-lognormalize_fc_mean <- function(x) {
+mean_log_rna_score <- function(x) {
   if (!ncol(x)) stop("Cannot calculate a group mean from zero cells.", call. = FALSE)
-  log2((Matrix::rowSums(expm1(x)) + 1) / ncol(x))
+  log2((Matrix::rowSums(x) + 1) / ncol(x))
 }
 
 fc_qa_rows <- list()
@@ -428,7 +431,7 @@ find_one_contrast <- function(lineage_name, eligible_genes, contrast_name, defin
     logfc.threshold = 0,
     min.pct = 0,
     only.pos = FALSE,
-    mean.fxn = lognormalize_fc_mean,
+    mean.fxn = mean_log_rna_score,
     fc.name = "avg_log2FC",
     base = 2,
     densify = FALSE,
@@ -437,7 +440,7 @@ find_one_contrast <- function(lineage_name, eligible_genes, contrast_name, defin
     tibble::rownames_to_column("gene")
   fc_candidates <- c("avg_log2FC", "avg_logFC", "avg_diff")
   fc_column <- fc_candidates[fc_candidates %in% colnames(result)]
-  if (!length(fc_column)) stop("Cannot identify a log-fold-change column.", call. = FALSE)
+  if (!length(fc_column)) stop("Cannot identify the group-effect column.", call. = FALSE)
   if (!identical(fc_column[[1]], "avg_log2FC")) {
     result <- dplyr::rename(result, avg_log2FC = dplyr::all_of(fc_column[[1]]))
   }
@@ -473,11 +476,15 @@ find_one_contrast <- function(lineage_name, eligible_genes, contrast_name, defin
   control_cells <- meta$cell[which(
     meta$lineage == lineage_name & meta$group == definition[["control"]]
   )]
-  manual_fc <- lognormalize_fc_mean(
-    data_matrix[eligible_genes, treated_cells, drop = FALSE]
-  ) - lognormalize_fc_mean(
-    data_matrix[eligible_genes, control_cells, drop = FALSE]
-  )
+  # This calculation uses row means instead of the group-score helper passed
+  # to Seurat. Re-order by the independently indexed gene names for comparison.
+  treated_mean <- Matrix::rowMeans(data_matrix[eligible_genes, treated_cells, drop = FALSE])
+  control_mean <- Matrix::rowMeans(data_matrix[eligible_genes, control_cells, drop = FALSE])
+  manual_fc <- log2(treated_mean + 1 / length(treated_cells)) -
+    log2(control_mean + 1 / length(control_cells))
+  if (!all(is.finite(manual_fc)) || !all(is.finite(result$avg_log2FC))) {
+    stop("Non-finite group effect: ", lineage_name, " / ", contrast_name, call. = FALSE)
+  }
   names(manual_fc) <- eligible_genes
   fc_error <- result$avg_log2FC - unname(manual_fc[result$gene])
   qa_key <- paste(lineage_name, contrast_name, sep = "__")
@@ -626,83 +633,86 @@ center_genes <- membership |>
     WT_p_adj_BH, dplyr::desc(abs(WT_avg_log2FC)), gene
   )
 
-# Prespecified display terms receive priority only when they remain significant.
+# August 13 Step07b, Fig5 rows only (Step07b__biological_GO_selection_manifest.csv).
+# Source SHA256: ffb057e740973bc1546ff2bfb411152b7119b49c738c610de4e8ba91571dc8b0.
+# Only display identifiers, names and order are embedded; statistics come from
+# the enrichment recalculated below. The August script orders plot bars by GeneRatio.
 display_term_manifest <- tibble::tribble(
-  ~lineage, ~direction, ~display_order, ~Description,
-  "Neu", "Up", 1L, "oxidative phosphorylation",
-  "Neu", "Up", 2L, "aerobic respiration",
-  "Neu", "Up", 3L, "ATP metabolic process",
-  "Neu", "Up", 4L, "proton motive force-driven ATP synthesis",
-  "Neu", "Up", 5L, "small molecule metabolic process",
-  "Neu", "Up", 6L, "antimicrobial humoral response",
-  "Neu", "Down", 1L, "defense response to other organism",
-  "Neu", "Down", 2L, "regulation of innate immune response",
-  "Neu", "Down", 3L, "response to virus",
-  "Neu", "Down", 4L, "interferon-mediated signaling pathway",
-  "Neu", "Down", 5L, "antigen processing and presentation",
-  "Neu", "Down", 6L, "antigen processing and presentation of endogenous peptide antigen via MHC class I",
-  "Mac", "Up", 1L, "positive regulation of cell death",
-  "Mac", "Up", 2L, "acute-phase response",
-  "Mac", "Up", 3L, "fatty acid transport",
-  "Mac", "Down", 1L, "innate immune response",
-  "Mac", "Down", 2L, "response to cytokine",
-  "Mac", "Down", 3L, "antigen processing and presentation",
-  "Mac", "Down", 4L, "immune effector process",
-  "Mac", "Down", 5L, "antimicrobial humoral immune response mediated by antimicrobial peptide",
-  "Mac", "Down", 6L, "regulation of immune response",
-  "Mono", "Up", 1L, "mitochondrion organization",
-  "Mono", "Up", 2L, "purine-containing compound metabolic process",
-  "Mono", "Up", 3L, "ATP metabolic process",
-  "Mono", "Up", 4L, "aerobic respiration",
-  "Mono", "Up", 5L, "purine nucleoside triphosphate biosynthetic process",
-  "Mono", "Up", 6L, "ribonucleoside triphosphate biosynthetic process",
-  "DC", "Up", 1L, "cellular respiration",
-  "DC", "Up", 2L, "oxidative phosphorylation",
-  "DC", "Up", 3L, "ATP metabolic process",
-  "DC", "Up", 4L, "proton motive force-driven ATP synthesis",
-  "DC", "Up", 5L, "ribonucleoside triphosphate biosynthetic process",
-  "DC", "Up", 6L, "purine nucleoside triphosphate biosynthetic process",
-  "DC", "Down", 1L, "regulation of vesicle-mediated transport",
-  "CD8T", "Up", 1L, "aerobic respiration",
-  "CD8T", "Up", 2L, "oxidative phosphorylation",
-  "CD8T", "Up", 3L, "ATP metabolic process",
-  "CD8T", "Up", 4L, "proton motive force-driven ATP synthesis",
-  "CD8T", "Up", 5L, "nucleoside triphosphate biosynthetic process",
-  "CD8T", "Up", 6L, "ribonucleoside triphosphate biosynthetic process",
-  "CD8T", "Down", 1L, "inflammatory response",
-  "CD8T", "Down", 2L, "cytokine-mediated signaling pathway",
-  "CD8T", "Down", 3L, "cytokine production",
-  "CD8T", "Down", 4L, "immune effector process",
-  "CD8T", "Down", 5L, "leukocyte activation involved in immune response",
-  "CD8T", "Down", 6L, "regulation of T-helper 1 type immune response",
-  "NonCD8_T", "Up", 1L, "cytoplasmic translation",
-  "NonCD8_T", "Up", 2L, "ATP metabolic process",
-  "NonCD8_T", "Up", 3L, "cellular respiration",
-  "NonCD8_T", "Up", 4L, "proton motive force-driven ATP synthesis",
-  "NonCD8_T", "Up", 5L, "purine nucleoside triphosphate biosynthetic process",
-  "NonCD8_T", "Up", 6L, "purine ribonucleotide metabolic process",
-  "NonCD8_T", "Down", 1L, "cytokine production",
-  "NonCD8_T", "Down", 2L, "response to cytokine",
-  "NonCD8_T", "Down", 3L, "regulation of cytokine production",
-  "NonCD8_T", "Down", 4L, "regulation of T cell proliferation",
-  "NonCD8_T", "Down", 5L, "regulation of leukocyte proliferation",
-  "NonCD8_T", "Down", 6L, "cell adhesion",
-  "NK", "Up", 1L, "aerobic respiration",
-  "NK", "Up", 2L, "oxidative phosphorylation",
-  "NK", "Up", 3L, "ATP metabolic process",
-  "NK", "Up", 4L, "purine nucleoside triphosphate biosynthetic process",
-  "NK", "Up", 5L, "ribonucleoside triphosphate biosynthetic process",
-  "NK", "Up", 6L, "ribose phosphate biosynthetic process",
-  "B", "Up", 1L, "oxidative phosphorylation",
-  "B", "Up", 2L, "aerobic respiration",
-  "B", "Up", 3L, "proton motive force-driven ATP synthesis",
-  "B", "Up", 4L, "mitochondrion organization",
-  "B", "Up", 5L, "positive regulation of intrinsic apoptotic signaling pathway",
-  "B", "Up", 6L, "intrinsic apoptotic signaling pathway by p53 class mediator",
-  "B", "Down", 1L, "glycoprotein metabolic process",
-  "B", "Down", 2L, "intracellular protein transport",
-  "B", "Down", 3L, "cellular response to growth factor stimulus",
-  "B", "Down", 4L, "vesicle organization"
+  ~lineage, ~direction, ~display_order, ~ID, ~expected_description,
+  "Neu", "Up", 1L, "GO:0006119", "oxidative phosphorylation",
+  "Neu", "Up", 2L, "GO:0009060", "aerobic respiration",
+  "Neu", "Up", 3L, "GO:0046034", "ATP metabolic process",
+  "Neu", "Up", 4L, "GO:0015986", "proton motive force-driven ATP synthesis",
+  "Neu", "Up", 5L, "GO:0044281", "small molecule metabolic process",
+  "Neu", "Up", 6L, "GO:0019730", "antimicrobial humoral response",
+  "Neu", "Down", 1L, "GO:0098542", "defense response to other organism",
+  "Neu", "Down", 2L, "GO:0045088", "regulation of innate immune response",
+  "Neu", "Down", 3L, "GO:0009615", "response to virus",
+  "Neu", "Down", 4L, "GO:0140888", "interferon-mediated signaling pathway",
+  "Neu", "Down", 5L, "GO:0019882", "antigen processing and presentation",
+  "Neu", "Down", 6L, "GO:0019885", "antigen processing and presentation of endogenous peptide antigen via MHC class I",
+  "Mac", "Up", 1L, "GO:0010942", "positive regulation of cell death",
+  "Mac", "Up", 2L, "GO:0006953", "acute-phase response",
+  "Mac", "Up", 3L, "GO:0015908", "fatty acid transport",
+  "Mac", "Down", 1L, "GO:0045087", "innate immune response",
+  "Mac", "Down", 2L, "GO:0034097", "response to cytokine",
+  "Mac", "Down", 3L, "GO:0019882", "antigen processing and presentation",
+  "Mac", "Down", 4L, "GO:0002252", "immune effector process",
+  "Mac", "Down", 5L, "GO:0061844", "antimicrobial humoral immune response mediated by antimicrobial peptide",
+  "Mac", "Down", 6L, "GO:0050776", "regulation of immune response",
+  "Mono", "Up", 1L, "GO:0007005", "mitochondrion organization",
+  "Mono", "Up", 2L, "GO:0072521", "purine-containing compound metabolic process",
+  "Mono", "Up", 3L, "GO:0046034", "ATP metabolic process",
+  "Mono", "Up", 4L, "GO:0009060", "aerobic respiration",
+  "Mono", "Up", 5L, "GO:0009145", "purine nucleoside triphosphate biosynthetic process",
+  "Mono", "Up", 6L, "GO:0009201", "ribonucleoside triphosphate biosynthetic process",
+  "DC", "Up", 1L, "GO:0045333", "cellular respiration",
+  "DC", "Up", 2L, "GO:0006119", "oxidative phosphorylation",
+  "DC", "Up", 3L, "GO:0046034", "ATP metabolic process",
+  "DC", "Up", 4L, "GO:0015986", "proton motive force-driven ATP synthesis",
+  "DC", "Up", 5L, "GO:0009201", "ribonucleoside triphosphate biosynthetic process",
+  "DC", "Up", 6L, "GO:0009145", "purine nucleoside triphosphate biosynthetic process",
+  "DC", "Down", 1L, "GO:0060627", "regulation of vesicle-mediated transport",
+  "NK", "Up", 1L, "GO:0009060", "aerobic respiration",
+  "NK", "Up", 2L, "GO:0006119", "oxidative phosphorylation",
+  "NK", "Up", 3L, "GO:0046034", "ATP metabolic process",
+  "NK", "Up", 4L, "GO:0009145", "purine nucleoside triphosphate biosynthetic process",
+  "NK", "Up", 5L, "GO:0009201", "ribonucleoside triphosphate biosynthetic process",
+  "NK", "Up", 6L, "GO:0046390", "ribose phosphate biosynthetic process",
+  "CD8T", "Up", 1L, "GO:0009060", "aerobic respiration",
+  "CD8T", "Up", 2L, "GO:0006119", "oxidative phosphorylation",
+  "CD8T", "Up", 3L, "GO:0046034", "ATP metabolic process",
+  "CD8T", "Up", 4L, "GO:0015986", "proton motive force-driven ATP synthesis",
+  "CD8T", "Up", 5L, "GO:0009142", "nucleoside triphosphate biosynthetic process",
+  "CD8T", "Up", 6L, "GO:0009201", "ribonucleoside triphosphate biosynthetic process",
+  "CD8T", "Down", 1L, "GO:0006954", "inflammatory response",
+  "CD8T", "Down", 2L, "GO:0019221", "cytokine-mediated signaling pathway",
+  "CD8T", "Down", 3L, "GO:0001816", "cytokine production",
+  "CD8T", "Down", 4L, "GO:0002252", "immune effector process",
+  "CD8T", "Down", 5L, "GO:0002366", "leukocyte activation involved in immune response",
+  "CD8T", "Down", 6L, "GO:0002825", "regulation of T-helper 1 type immune response",
+  "NonCD8_T", "Up", 1L, "GO:0002181", "cytoplasmic translation",
+  "NonCD8_T", "Up", 2L, "GO:0046034", "ATP metabolic process",
+  "NonCD8_T", "Up", 3L, "GO:0045333", "cellular respiration",
+  "NonCD8_T", "Up", 4L, "GO:0015986", "proton motive force-driven ATP synthesis",
+  "NonCD8_T", "Up", 5L, "GO:0009145", "purine nucleoside triphosphate biosynthetic process",
+  "NonCD8_T", "Up", 6L, "GO:0009150", "purine ribonucleotide metabolic process",
+  "NonCD8_T", "Down", 1L, "GO:0001816", "cytokine production",
+  "NonCD8_T", "Down", 2L, "GO:0034097", "response to cytokine",
+  "NonCD8_T", "Down", 3L, "GO:0001817", "regulation of cytokine production",
+  "NonCD8_T", "Down", 4L, "GO:0042129", "regulation of T cell proliferation",
+  "NonCD8_T", "Down", 5L, "GO:0070663", "regulation of leukocyte proliferation",
+  "NonCD8_T", "Down", 6L, "GO:0007155", "cell adhesion",
+  "B", "Up", 1L, "GO:0006119", "oxidative phosphorylation",
+  "B", "Up", 2L, "GO:0009060", "aerobic respiration",
+  "B", "Up", 3L, "GO:0015986", "proton motive force-driven ATP synthesis",
+  "B", "Up", 4L, "GO:0007005", "mitochondrion organization",
+  "B", "Up", 5L, "GO:2001244", "positive regulation of intrinsic apoptotic signaling pathway",
+  "B", "Up", 6L, "GO:0072332", "intrinsic apoptotic signaling pathway by p53 class mediator",
+  "B", "Down", 1L, "GO:0009100", "glycoprotein metabolic process",
+  "B", "Down", 2L, "GO:0006886", "intracellular protein transport",
+  "B", "Down", 3L, "GO:0071363", "cellular response to growth factor stimulus",
+  "B", "Down", 4L, "GO:0016050", "vesicle organization"
 )
 
 message("Preparing mouse GO semantic data.")
@@ -823,35 +833,45 @@ go_mapping <- dplyr::bind_rows(go_mapping_rows)
 go_full <- dplyr::bind_rows(go_full_rows)
 go_simplified <- dplyr::bind_rows(go_simplified_rows)
 
-go_display <- go_simplified |>
-  dplyr::filter(is.finite(p.adjust), p.adjust < deg_bh_fdr) |>
+# Each historical ID must still map to the same term and survive both fresh
+# BH adjustment and semantic simplification. Missing entries are written to
+# the audit table and stop this run; no term is backfilled.
+go_key <- c("lineage", "direction", "ID")
+go_selection_audit <- display_term_manifest |>
   dplyr::left_join(
-    display_term_manifest |>
-      dplyr::rename(prespecified_display_order = display_order),
-    by = c("lineage", "direction", "Description"),
-    relationship = "one-to-one"
+    go_full |> dplyr::select(lineage, direction, ID, Description, p.adjust),
+    by = go_key, relationship = "one-to-one"
+  ) |>
+  dplyr::left_join(
+    go_simplified |> dplyr::transmute(lineage, direction, ID, in_simplified = TRUE),
+    by = go_key, relationship = "one-to-one"
   ) |>
   dplyr::mutate(
-    retained_prespecified_priority = !is.na(prespecified_display_order),
-    prespecified_display_order = dplyr::coalesce(prespecified_display_order, 9999L)
-  ) |>
-  dplyr::group_by(lineage, direction) |>
-  dplyr::arrange(
-    dplyr::desc(retained_prespecified_priority), prespecified_display_order,
-    p.adjust, dplyr::desc(Count), ID,
-    .by_group = TRUE
-  ) |>
-  dplyr::slice_head(n = 6L) |>
-  dplyr::mutate(
-    display_order = dplyr::row_number(),
-    display_selection = dplyr::if_else(
-      retained_prespecified_priority,
-      "prespecified_term_still_significant",
-      "statistical_fill_from_simplified_result"
+    in_simplified = dplyr::coalesce(in_simplified, FALSE),
+    audit_status = dplyr::case_when(
+      is.na(Description) ~ "MISSING_FROM_TESTED_RESULTS",
+      Description != expected_description ~ "TERM_NAME_CHANGED",
+      !is.finite(p.adjust) | p.adjust >= deg_bh_fdr ~ "NOT_BH_SIGNIFICANT",
+      !in_simplified ~ "NOT_RETAINED_AFTER_SIMPLIFY",
+      TRUE ~ "PASS"
     )
+  )
+write_csv_atomic(go_selection_audit, output_paths$go_audit)
+if (any(go_selection_audit$audit_status != "PASS")) {
+  failed <- go_selection_audit |> dplyr::filter(audit_status != "PASS")
+  stop("Historical GO display mismatch: ",
+       paste(failed$lineage, failed$direction, failed$ID, failed$audit_status, collapse = "; "),
+       ". See ", output_paths$go_audit, call. = FALSE)
+}
+go_display <- go_simplified |>
+  dplyr::inner_join(
+    display_term_manifest |> dplyr::select(lineage, direction, ID, display_order),
+    by = go_key, relationship = "one-to-one"
   ) |>
-  dplyr::ungroup() |>
   dplyr::mutate(
+    prespecified_display_order = display_order,
+    retained_prespecified_priority = TRUE,
+    display_selection = "August_Step07b_Fig5_named_ID",
     GeneRatio_numeric = parse_gene_ratio(GeneRatio),
     neg_log10_adjusted_P = -log10(pmax(p.adjust, .Machine$double.xmin)),
     Description_wrapped = vapply(
@@ -1027,7 +1047,7 @@ qa <- data.frame(
     "input_md5_contract", "canonical_cell_count", "canonical_feature_count",
     "six_fixed_groups", "eight_fixed_lineages", "all_lineage_groups_ge_30",
     "twenty_four_DE_comparisons", "same_universe_within_lineage",
-    "explicit_LogNormalize_FC_formula", "BH_range", "finite_effects", "center_set_identity",
+    "historical_effect_independent_formula", "BH_range", "finite_effects", "center_set_identity",
     "attenuation_opposes_WT", "center_genes_are_LEN_DEG",
     "sixteen_Venn_rows", "sixteen_GO_status_rows",
     "GO_only_with_at_least_10_mappable", "display_terms_are_significant",
@@ -1102,7 +1122,7 @@ analysis_contract <- data.frame(
   field = c(
     "script_version", "statistical_unit", "inference_scope", "groups",
     "lineages", "RNA_layer", "minimum_cells_per_lineage_group",
-    "common_universe_rule", "DE_method", "DE_fold_change_mean_function",
+    "common_universe_rule", "DE_method", "DE_group_score_and_effect_scale",
     "DE_logfc_threshold_during_test",
     "DE_min_pct_during_test", "DEG_threshold", "multiple_testing",
     "AMG_DiD", "KO_DiD", "attenuation_rule", "joint_center",
@@ -1123,22 +1143,22 @@ analysis_contract <- data.frame(
     min_cells_per_group,
     "detected in >=10% of cells in any of six groups; same genes in WT/AMG/KO",
     "Seurat FindMarkers Wilcoxon",
-    "explicit log2((rowSums(expm1(x))+1)/ncol(x)); object command provenance ignored",
+    "x=ln(1+CP10K); S_g=log2((1+sum_i x_i)/n_g); matched effect E=S_treated-S_control. The avg_log2FC fields store E; the pseudocount is added once to each group sum.",
     0,
     0,
-    "absolute average log2FC >0.25 and within-comparison BH-FDR <0.05",
+    "absolute matched effect |E| >0.25 and within-comparison BH-FDR <0.05",
     "BH within each lineage x comparison",
     "(LENnAMG-CTRnAMG)-(LEN-CTR)",
     "(LENnKO-CTRnKO)-(LEN-CTR)",
-    "opposing abs(DiD)>0.25 plus >=50% reduction or direction reversal",
+    "opposing abs(E_background-E_WT)>0.25 plus abs(E_background)<=0.5*abs(E_WT) or direction reversal (an effect of zero also qualifies); percentage is measured on the E scale",
     "LEN DEG AND AMG attenuation AND KO attenuation in matching LEN direction",
     "GO Biological Process",
     "lineage-specific tested gene universe",
     "BH; adjusted P <0.05; no threshold relaxation",
     "Wang semantic similarity, cutoff 0.70, select_fun=min",
     paste(
-      "up to six simplified significant terms; prespecified terms have priority only",
-      "when still significant, then fill by adjusted P, Count, and GO ID"
+      "only the August 13 Step07b Fig5 GO IDs in each lineage/direction and listed order;",
+      "same name, BH-adjusted P<0.05 and survival of Wang simplification required; no replacements; bars ordered by GeneRatio."
     ),
     "Figure 13 myeloid Venn+GO; Figure 17 lymphoid Venn+GO",
     "full-CD45 UMAP/composition; volcano; LEN-only GO; pDC/Baso DEG; other exploratory displays"
@@ -1183,11 +1203,12 @@ summary_lines <- c(
   paste0("- Fixed lineages: ", paste(lineage_levels, collapse = ", "), "."),
   "- Three matched-background effects were recalculated from the canonical Seurat object.",
   paste0(
-    "- Fold change used an explicit LogNormalize mean function independent of stored Seurat commands; ",
-    "maximum manual-formula error was ", format(max(fc_qa$max_abs_formula_error), scientific = TRUE), "."
+    "- Group score S=log2((1+sum(x))/n) uses x=ln(1+CP10K); matched effect E=S_treated-S_control; ",
+    "maximum error against independent row-mean calculation was ", format(max(fc_qa$max_abs_formula_error), scientific = TRUE), "."
   ),
   "- BH correction was recalculated within each lineage and comparison.",
   "- GO:BP used the corresponding lineage-specific tested universe and semantic simplify().",
+  "- GO display uses the 74 named August Step07b Fig5 lineage/direction/GO ID entries.",
   "- Only Figures 13 and 17 were generated.",
   "",
   "## Joint-center counts",
