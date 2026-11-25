@@ -19,7 +19,8 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
       length(list.files(output_dir, all.files = TRUE, no.. = TRUE)))) {
     stop("Output directory must be new or empty; no files were changed.")
   }
-  clin <- as.data.frame(readxl::read_xlsx(args[[1]], sheet = sheet))
+  clin <- as.data.frame(readxl::read_xlsx(args[[1]], sheet = sheet,
+    skip = as.integer(sheet == "Fig1b_annotation")))
   if (!all(c("FL_ID", "mRECIST") %in% names(clin))) stop("Clinical columns FL_ID and mRECIST are required.")
   patient_id <- trimws(as.character(clin$FL_ID))
   if (anyNA(patient_id) || any(!nzchar(patient_id)) || anyDuplicated(patient_id)) stop("Clinical patient IDs must be unique and nonempty.")

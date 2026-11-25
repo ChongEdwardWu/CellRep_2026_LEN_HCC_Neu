@@ -205,6 +205,45 @@ run_findmarkers <- function(seu_obj,
   out
 }
 
+run_bin_markers <- function(seu_obj, ident1, ident2, min_pct = 0.1) {
+  bin <- Seurat::GetAssayData(seu_obj, assay = "Bin", layer = "data")
+  treated <- bin[, Seurat::WhichCells(seu_obj, idents = ident1), drop = FALSE]
+  control <- bin[, Seurat::WhichCells(seu_obj, idents = ident2), drop = FALSE]
+  if (any(treated != 0 & treated != 1) || any(control != 0 & control != 1)) {
+    stop("The Bin assay must contain only 0/1 regulon calls.")
+  }
+  n1 <- ncol(treated)
+  n2 <- ncol(control)
+  k1 <- Matrix::rowSums(treated)
+  k2 <- Matrix::rowSums(control)
+  # Use the same rounded detection fractions and prevalence filter as Step 4.
+  pct1 <- round(k1 / n1, 3)
+  pct2 <- round(k2 / n2, 3)
+  eligible <- which(pmax(pct1, pct2) >= min_pct)
+
+  p <- vapply(eligible, function(i) {
+    # Equal positive fractions give a centered rank sum, including constant rows.
+    if (k1[i] * n2 == k2[i] * n1) return(1)
+    x <- as.numeric(treated[i, ])
+    y <- as.numeric(control[i, ])
+    # Base R accounts for ties in both binary values. Evaluate the smaller tail
+    # directly to preserve small two-sided P values across R versions.
+    tail <- if (k1[i] / n1 > k2[i] / n2) "greater" else "less"
+    tail_p <- stats::wilcox.test(x, y, alternative = tail,
+                                 exact = FALSE, correct = TRUE)$p.value
+    min(1, 2 * tail_p)
+  }, numeric(1), USE.NAMES = FALSE)
+
+  tibble::tibble(
+    feature = rownames(bin)[eligible],
+    p_val = p,
+    avg_log2FC = log2((k1[eligible] + 1) / n1) - log2((k2[eligible] + 1) / n2),
+    pct.1 = pct1[eligible],
+    pct.2 = pct2[eligible],
+    p_val_adj = stats::p.adjust(p, method = "bonferroni", n = nrow(bin))
+  ) %>% dplyr::arrange(p_val_adj, p_val)
+}
+
 run_fgsea_from_rank <- function(rank_df,
                                 pathways,
                                 minSize = 10,
@@ -417,18 +456,7 @@ for (cmp_nm in names(comparisons)) {
 
   ## ---- Regulon Bin DE
   Seurat::DefaultAssay(seu_sub) <- "Bin"
-  deg_bin <- run_findmarkers(
-    seu_obj       = seu_sub,
-    assay         = "Bin",
-    ident1        = g1,
-    ident2        = g2,
-    features      = rownames(seu_sub[["Bin"]]),
-    min_pct       = 0.1,
-    logfc         = 0,
-    test_use      = "wilcox",
-    min_cells     = min_cells_per_group,
-    return_thresh = 1
-  )
+  deg_bin <- run_bin_markers(seu_sub, g1, g2, min_pct = 0.1)
 
   ## ---- Scores (UCell etc.) cell-level
   score_cell <- score_compare_celllevel(

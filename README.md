@@ -17,7 +17,10 @@ LEN_HCC_Neu/
 │   ├── Human/
 │   │   ├── Step1_Human_nCounter_signature_scores.R
 │   │   ├── Step2_Human_PD_delta_heatmaps.R
-│   │   └── Step3_Human_PD_signature_ranking.R
+│   │   ├── Step2b_Human_PD_signature_statistics.R
+│   │   ├── Step3_Human_PD_signature_ranking.R
+│   │   ├── Paired_Human_nCounter_panels.R
+│   │   └── Human_Fig1C_PFS.R
 │   ├── Spatial/
 │   │   └── Distance_and_phenotype_analysis.R
 │   ├── Survival/
@@ -37,6 +40,7 @@ LEN_HCC_Neu/
 │   └── run_cellbender_batch.sh
 ├── env/
 │   └── .gitkeep
+├── run_clinical.R
 └── README.md
 ```
 
@@ -67,6 +71,7 @@ LEN_HCC_Neu/
 
 8. `R/Analysis/Step4_Len_Neu_DEG.R`
    - Performs neutrophil differential-expression, regulon-activity, score, and gene-set enrichment analyses.
+   - For binary regulon activity, the two-sided Wilcoxon rank-sum test accounts for ties at both 0 and 1 and uses a continuity correction. Bonferroni adjustment uses the full number of regulons in the assay (214 for Data S3).
 
 9. `R/Analysis/Step5_Len_LENvsCTR_Figures.R`
    - Generates neutrophil-focused figure panels.
@@ -79,20 +84,21 @@ LEN_HCC_Neu/
 
 ### Human nCounter workflow
 
-The three scripts in `R/Human/` cover Figures S1A, 1A, and S1B, respectively. Run them from the repository root with `readxl`, `ggplot2`, and `pheatmap` installed:
+Run the clinical workflow from the repository root with R and the packages `readxl`, `ggplot2`, `pheatmap`, and `survival`. The command below uses `nCounter_Normalization.xlsx` from the [Yamauchi et al. data deposit](https://doi.org/10.6084/m9.figshare.22215760.v3) and Supplementary Data 3 (`43856_2023_390_MOESM5_ESM.xlsx`) from [the original article](https://doi.org/10.1038/s43856-023-00390-x).
 
 ```bash
-Rscript R/Human/Step1_Human_nCounter_signature_scores.R "data/human/nCounter_Normalization-1.xlsx" "data/human/sample_metadata.csv" "results/human/signatures"
-Rscript R/Human/Step2_Human_PD_delta_heatmaps.R "data/human/patient annotation-1.xlsx" "results/human/signatures/signature_scores_and_z_by_sample.csv" "results/human/paired_changes"
-Rscript R/Human/Step3_Human_PD_signature_ranking.R "data/human/S1B_STable_PD_delta_stats_ALLsignatures.csv" "results/human/ranking"
+Rscript run_clinical.R "data/human/nCounter_Normalization.xlsx" "data/human/43856_2023_390_MOESM5_ESM.xlsx" "results/human" "data/human/43856_2023_390_MOESM5_ESM.xlsx"
 ```
 
-- **Inputs:** normalized nCounter workbook (`NC_9785_N1_Normalization` sheet; sample IDs in row 3, samples from column 8, genes from row 5); sample metadata with `sample_id`, `patient_id`, and `timepoint` (`baseline`, `week4`, or `PD`); clinical workbook (`Patient annotation` sheet; `FL_ID` and `mRECIST`). A final argument can override each sheet name. The supplied sample-score table can also serve as metadata: only its three metadata columns are read. Metadata must match all expression samples, and RCC-header/FL-ID column selections must agree.
-- **Scores and paired changes:** each signature is the mean of marker-level `log2(normalized expression + 1)`. Z scores use the mean and sample SD of all baseline samples. Step 2 uses paired baseline and PD-biopsy samples to calculate within-patient `PD biopsy Z - baseline Z` and summarizes by mRECIST response (`PD` versus `CR/PR/SD`, grouped as `non-PD`). The biopsy timepoint and response group are separate variables. `CXCR2/CSF3R` is consistently named `Neutrophil`.
-- **Marker plot:** color is `log2(mean normalized expression + 1)`, distinct from the signature-score calculation. Dot size uses the workbook percentage above threshold; only if that column is absent does it use the fraction of expression values greater than zero.
-- **Ranking:** Step 3 reads the supplied summary statistics, including `signature`, `diff_median`, `prop_up_PD`, `prop_up_nonPD`, `r_rank_biserial`, `ci_med_low`, and `ci_med_high`. It retains the descriptive formula `0.5*z(diff_median) + 0.2*z(prop_up_PD - prop_up_nonPD) + 0.3*z(sign(diff_median)*abs(r_rank_biserial))`, with standardization across signatures. The x-axis shows the median difference; signatures are ordered by the composite score. Confidence intervals and inferential statistics are read from the input table.
+The first argument supplies normalized expression (sheet `NC_9785_N1_Normalization`). The second supplies clinical annotations (sheet `Fig1b_annotation` or `Patient annotation`). The third is a new output directory. The fourth identifies biopsy timepoints: the `Fig3b` sheet in Supplementary Data 3 identifies the eight week-4 biopsies among the 20 follow-up samples. The remaining 12 are progression biopsies. Alternatively, supply a CSV with one row per expression sample and the columns `sample_id`, `patient_id`, and `timepoint` (`baseline`, `week4`, or `PD`).
 
-Each script writes figures and supporting CSV tables to a new or empty output directory and records `sessionInfo.txt`.
+| Panels | Calculation |
+| --- | --- |
+| S1A | Marker color shows log2(mean normalized expression + 1). |
+| 1A, S1B | Steps 1 and 2 average log2-transformed marker expression within each signature, standardize the signature against 39 baseline biopsies using the sample SD, and calculate within-patient changes from baseline to progression. |
+| S1B | Step 2b compares changes between the PD and non-PD response groups. It computes the rank-biserial effect from all cross-group patient pairs and exact within-group percentile bootstrap intervals for the difference of medians. Step 3 orders signatures by the composite score and writes the myeloid panel to `step3/SFig_rank_lollipop_MYeloid.pdf`. |
+| 1B, S1C–F | Each log-transformed marker is standardized across 40 biopsies from 20 paired patients using the population SD. Marker Z scores are averaged within signatures. Baseline and progression scores are compared by a paired t test within each best-response group (3 PD and 9 non-PD patients). |
+| 1C | The Kaplan–Meier curves and log-rank test use all 20 paired patients, grouped by whether their baseline-referenced neutrophil signature increased. |
 
 ### Spatial distance analysis
 
@@ -123,7 +129,7 @@ Both scripts write to a new or empty output directory.
 - `SCENIC`, `SCopeLoomR`
 - `msigdbr`, `fgsea`, `clusterProfiler`, `org.Mm.eg.db`, `AnnotationDbi`, `GOSemSim`
 - `tidyverse`, `Matrix`, `openxlsx2`, `patchwork`, `ggridges`, `ggVennDiagram`, `ragg`
-- `readxl`, `ggplot2`, `pheatmap` (human nCounter workflow)
+- `readxl`, `ggplot2`, `pheatmap`, `survival` (human nCounter workflow)
 - `phenoptr`, `rtree` (spatial distances)
 - `data.table`, `IOBR`, `GSVA`, `msigdbr`, `org.Hs.eg.db`, `AnnotationDbi`, `survival`, `survminer`, `maxstat`, `ggplot2` (TCGA-LIHC survival)
 
