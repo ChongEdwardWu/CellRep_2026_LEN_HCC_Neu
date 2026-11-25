@@ -1,4 +1,4 @@
-# LEN_HCC_Neu
+# CellRep_2026_LEN_HCC_Neu
 
 Analysis code for mouse single-cell and bulk RNA sequencing, human nCounter immune signatures, spatial cell distances, and TCGA-LIHC survival analyses.
 
